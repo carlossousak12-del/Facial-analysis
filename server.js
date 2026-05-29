@@ -13,6 +13,22 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static('public'));
 
+// Helper function to validate analysis response structure
+function validateAnalysisResponse(data) {
+  const requiredFields = ['nome_estudo', 'codigo', 'data', 'scores', 'analise', 'tercos', 'recomendacoes', 'assinatura'];
+  const missingFields = requiredFields.filter(field => !(field in data));
+  
+  if (missingFields.length > 0) {
+    throw new Error(`Missing required fields: ${missingFields.join(', ')}`);
+  }
+  
+  if (!data.scores.atratividade || !data.scores.harmonia) {
+    throw new Error('Invalid scores structure');
+  }
+  
+  return true;
+}
+
 // API endpoint para análise facial
 app.post('/api/analyze', async (req, res) => {
   try {
@@ -69,7 +85,7 @@ app.post('/api/analyze', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
+        max_tokens: 1500,
         system: SYSTEM,
         messages: [
           {
@@ -99,7 +115,16 @@ app.post('/api/analyze', async (req, res) => {
       console.error('Anthropic API error:', jsonResponse);
       return res.status(response.status).json({
         error: 'Failed to analyze image',
-        details: jsonResponse
+        details: jsonResponse.error || jsonResponse
+      });
+    }
+
+    // Validate response has content
+    if (!jsonResponse.content || !Array.isArray(jsonResponse.content) || jsonResponse.content.length === 0) {
+      console.error('Empty response from Anthropic API:', jsonResponse);
+      return res.status(500).json({
+        error: 'Empty response from analysis API',
+        details: 'No content returned'
       });
     }
 
@@ -108,17 +133,50 @@ app.post('/api/analyze', async (req, res) => {
       .filter(c => c.type === 'text')
       .map(c => c.text)
       .join('')
-      .replace(/```json|```/g, '')
+      .replace(/```json\n?|```\n?/g, '') // Better regex handling
       .trim();
 
-    const analysisData = JSON.parse(textContent);
+    if (!textContent) {
+      console.error('No text content in API response:', jsonResponse);
+      return res.status(500).json({
+        error: 'No analysis text in response',
+        details: 'Failed to extract text content'
+      });
+    }
+
+    // Parse and validate JSON
+    let analysisData;
+    try {
+      analysisData = JSON.parse(textContent);
+    } catch (parseError) {
+      console.error('JSON Parse error:', parseError.message);
+      console.error('Raw content:', textContent.substring(0, 500)); // Log first 500 chars
+      return res.status(500).json({
+        error: 'Invalid JSON response from analysis API',
+        details: parseError.message,
+        hint: 'The AI response could not be parsed as valid JSON'
+      });
+    }
+
+    // Validate analysis data structure
+    try {
+      validateAnalysisResponse(analysisData);
+    } catch (validationError) {
+      console.error('Validation error:', validationError.message);
+      return res.status(500).json({
+        error: 'Invalid analysis response structure',
+        details: validationError.message
+      });
+    }
+
     res.json(analysisData);
 
   } catch (error) {
     console.error('Server error:', error);
     res.status(500).json({
       error: 'Server error',
-      message: error.message
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
